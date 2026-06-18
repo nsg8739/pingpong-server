@@ -1,0 +1,16 @@
+{
+  "name": "pingpong-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "웹 탁구 2인 대전용 WebSocket 중계 서버",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
