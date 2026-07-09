@@ -18,7 +18,7 @@ import http from "node:http";
 import { WebSocketServer } from "ws";
 
 const PORT = process.env.PORT || 8080;
-const GRACE_MS = 60 * 1000;  // 재접속 유예: 이 시간 안에 안 돌아오면 방 종료
+const GRACE_MS = 5 * 60 * 1000;  // 재접속 유예: 이 시간 안에 안 돌아오면 방 종료(실수 이탈 후 코드 재입장용 5분)
 
 // code -> { slots:[{ws, token, connected, graceTimer}], capacity, createdAt, reconnect }
 // slots[0] = 호스트. 슬롯은 끊겨도 유지(재접속용) — reconnect 방에서만.
