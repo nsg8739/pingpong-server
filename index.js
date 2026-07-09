@@ -1,11 +1,16 @@
-// 웹 탁구 2인 대전용 WebSocket 중계 서버.
+// 웹 보드게임 2~4인 대전용 WebSocket 중계 서버.
 //
-// 역할: 방(room) 관리 + 두 피어 사이의 메시지 "단순 중계"만 한다.
-// 게임 물리는 호스트(방장) 브라우저가 권한을 갖고 계산하며, 서버는 게임 로직을 전혀 모른다.
-// 왜 WebSocket인가: 탁구는 실시간 액션이라 폴링(웹도블 방식)으론 지연이 커서 끊겨 보임 → 양방향 푸시 필요.
+// 역할: 방(room) 관리 + 같은 방 피어들 사이의 메시지 "단순 중계"만 한다.
+// 게임 로직은 전혀 모른다. 게임 물리/규칙은 호스트(방장) 브라우저가 권한을 갖고 계산한다.
+//   - 탁구(versus.html): 2인 실시간, 호스트 권한.
+//   - 다빈치코드(davinci.html): 2~4인 턴제, 호스트 권한.
+//
+// 하위 호환: capacity를 지정하지 않으면 2인으로 동작(기존 탁구 대전과 동일).
+//   - 예전 프로토콜(create/join/peer-joined + 상대에게 중계)을 그대로 지원한다.
+//   - 확장: create에 capacity(2~4), 메시지에 to(특정 플레이어 인덱스 지정) 지원.
 //
 // 의존성:
-// - ws: 표준 경량 WebSocket 서버. 대안은 Node 내장 http의 upgrade를 직접 처리하는 것이지만 보일러플레이트가 큼.
+// - ws: 표준 경량 WebSocket 서버.
 // - http(내장): Render 헬스체크 및 무료 티어 콜드스타트 깨우기용 HTTP GET 응답.
 
 import http from "node:http";
@@ -13,8 +18,8 @@ import { WebSocketServer } from "ws";
 
 const PORT = process.env.PORT || 8080;
 
-// 방 저장: code -> { host: ws, guest: ws|null, createdAt: number }
-// 메모리에만 보관(휘발). 단일 인스턴스 전제 — Render 무료 플랜은 단일 인스턴스이므로 OK.
+// 방 저장: code -> { players: ws[], capacity: number, createdAt: number }
+// players[0] = 호스트(방장). 메모리에만 보관(휘발). 단일 인스턴스 전제.
 const rooms = new Map();
 
 // 4자리 방 코드. 사람이 불러주기 쉽게 혼동되는 글자(0/O, 1/I)는 제외.
@@ -33,9 +38,9 @@ function send(ws, obj) {
   if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
 }
 
-// 방에서 보낸 쪽의 "상대" 피어를 반환
-function peerOf(room, ws) {
-  return room.host === ws ? room.guest : room.host;
+// 방의 모든(또는 보낸 이 제외) 플레이어에게 전송
+function broadcast(room, obj, exceptWs = null) {
+  for (const p of room.players) if (p && p !== exceptWs) send(p, obj);
 }
 
 const server = http.createServer((req, res) => {
@@ -48,54 +53,73 @@ const wss = new WebSocketServer({ server });
 
 wss.on("connection", (ws) => {
   ws.roomCode = null;
-  ws.role = null;
+  ws.playerIndex = null;
 
   ws.on("message", (data) => {
     let msg;
     try { msg = JSON.parse(data); } catch { return; } // 깨진 메시지는 무시
 
-    // 방 생성 → 방장(host)
+    // 방 생성 → 방장(index 0). capacity 미지정 시 2인(기존 탁구와 동일).
     if (msg.type === "create") {
+      const capacity = Math.min(4, Math.max(2, Number(msg.capacity) || 2));
       const code = makeCode();
-      rooms.set(code, { host: ws, guest: null, createdAt: Date.now() });
+      rooms.set(code, { players: [ws], capacity, createdAt: Date.now() });
       ws.roomCode = code;
-      ws.role = "host";
-      send(ws, { type: "created", code, role: "host" });
+      ws.playerIndex = 0;
+      send(ws, { type: "created", code, index: 0, capacity, role: "host" });
+      send(ws, { type: "roster", count: 1, capacity });
       return;
     }
 
-    // 방 입장 → 참가자(guest)
+    // 방 입장 → 참가자(index 1..capacity-1)
     if (msg.type === "join") {
       const code = String(msg.code || "").toUpperCase();
       const room = rooms.get(code);
       if (!room) { send(ws, { type: "error", reason: "no-room", message: "방을 찾을 수 없습니다." }); return; }
-      if (room.guest) { send(ws, { type: "error", reason: "full", message: "이미 두 명이 입장한 방입니다." }); return; }
-      room.guest = ws;
+      if (room.players.length >= room.capacity) {
+        send(ws, { type: "error", reason: "full", message: "정원이 가득 찬 방입니다." }); return;
+      }
+      const index = room.players.length;
+      room.players.push(ws);
       ws.roomCode = code;
-      ws.role = "guest";
-      send(ws, { type: "joined", code, role: "guest" });
-      // 양쪽에 상대 입장 알림 → 호스트가 게임을 시작할 수 있음
-      send(room.host, { type: "peer-joined" });
-      send(room.guest, { type: "peer-joined" });
+      ws.playerIndex = index;
+      send(ws, { type: "joined", code, index, capacity: room.capacity, role: index === 0 ? "host" : "guest" });
+
+      // 현재 인원 현황을 방 전체에 알림(로비 표시용)
+      broadcast(room, { type: "roster", count: room.players.length, capacity: room.capacity });
+
+      // 정원이 차면 시작 신호. (2인일 땐 기존 탁구가 기대하던 peer-joined와 동일 시점)
+      if (room.players.length === room.capacity) {
+        broadcast(room, { type: "peer-joined", count: room.players.length, capacity: room.capacity });
+      }
       return;
     }
 
-    // 그 외(state/input/restart 등) 게임 메시지는 상대에게 그대로 중계
+    // 그 외 게임 메시지는 중계.
+    // - msg.to(숫자)가 있으면 해당 인덱스 플레이어에게만.
+    // - 없으면 보낸 이를 제외한 방 전체에게(기존 2인 동작과 동일: 상대 1명).
     const room = rooms.get(ws.roomCode);
     if (!room) return;
-    send(peerOf(room, ws), msg);
+    // 수신 측(호스트)이 보낸 이를 식별할 수 있도록 from을 덧붙인다.
+    if (typeof msg.from !== "number") msg.from = ws.playerIndex;
+    if (typeof msg.to === "number") {
+      const target = room.players[msg.to];
+      if (target && target !== ws) send(target, msg);
+    } else {
+      broadcast(room, msg, ws);
+    }
   });
 
   ws.on("close", () => {
     const room = rooms.get(ws.roomCode);
     if (!room) return;
-    send(peerOf(room, ws), { type: "peer-left" });
-    // 1:1 세션 모델: 누구든 나가면 방을 제거(남은 쪽은 메뉴로 돌아가 새 방을 만들면 됨).
+    // 세션 모델: 누구든 나가면 방을 종료(남은 사람들은 메뉴로). 단순·일관.
+    broadcast(room, { type: "peer-left" }, ws);
     rooms.delete(ws.roomCode);
   });
 });
 
-// 좀비 방 정리: 2시간 지난 방 제거(폴링이 아니라 연결이 끊기면 close로 정리되지만, 안전망).
+// 좀비 방 정리: 2시간 지난 방 제거(연결 끊기면 close로 정리되지만 안전망).
 setInterval(() => {
   const now = Date.now();
   for (const [code, room] of rooms) {
