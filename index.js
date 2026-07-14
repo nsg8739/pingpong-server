@@ -115,6 +115,10 @@ wss.on("connection", (ws) => {
     const room = rooms.get(ws.roomCode);
     if (!room) return;
     if (typeof msg.from !== "number") msg.from = ws.slotIndex;  // 수신 측이 보낸 이 식별
+    // 게임 액션(act)의 행위자도 서버가 소켓 슬롯으로 강제 스탬프한다.
+    // 호스트 applyAction이 a.from으로 턴/소유를 판정하므로, 클라이언트가 보낸 값을
+    // 그대로 신뢰하면 남의 차례·손패로 위조가 가능해진다. 슬롯 == 플레이어 인덱스.
+    if (msg.type === "act" && msg.a && typeof msg.a === "object") msg.a.from = ws.slotIndex;
     if (typeof msg.to === "number") {
       const s = room.slots[msg.to];
       if (s && s.connected && s.ws && s.ws !== ws) send(s.ws, msg);
